@@ -48,9 +48,13 @@ class InformationGainModule:
         Sums absolute differences in mean and std across all layers.
         Higher = model changed more during this learning step.
 
+        Uses the exact same parameter names from the stored snapshot
+        to ensure before/after comparison is consistent.
+
         Args:
             brain: The BabyBrain model (after weight update).
             sample_ratio: Fraction of parameters to sample (0.0-1.0).
+                Only used if no snapshot exists (fallback).
 
         Returns:
             Total information gain score.
@@ -58,7 +62,11 @@ class InformationGainModule:
         if self._snapshot is None:
             return 0.0
 
-        current = brain.get_parameter_snapshot(sample_ratio=sample_ratio)
+        # Use the exact parameter names from the before-snapshot
+        # to ensure we compare the same parameters
+        current = brain.get_parameter_snapshot(
+            param_names=list(self._snapshot.keys())
+        )
         total_change = 0.0
 
         for name in self._snapshot:
