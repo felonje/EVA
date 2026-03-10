@@ -1,0 +1,134 @@
+model:
+  type: "transformer"          # fallback; future: "mamba" if mamba-ssm installed
+  d_model: 768
+  n_layers: 12
+  n_heads: 12
+  vocab_size: 512              # character-level, expandable
+  random_init: true            # RON PROTOCOL: no pretrained weights
+  dtype: "float16"
+
+hardware:
+  max_ram_gb: 4
+
+curiosity:
+  alpha: 0.3                   # prediction error weight
+  beta: 0.3                    # information gain weight
+  gamma: 0.2                   # novelty weight
+  delta: 0.2                   # empowerment weight
+
+emotions:
+  enabled: true
+  dimensions: ["valence", "arousal", "dominance", "novelty_feeling", "social"]
+  modulation:
+    learning_rate_scale: [0.5, 2.0]
+    memory_importance_scale: [0.1, 1.0]
+    exploration_temperature_scale: [0.3, 2.0]
+  circuit_breakers:
+    valence_floor: -0.8
+    arousal_ceiling: 0.95
+    perseveration_limit: 50
+    dominance_decay: 0.99
+
+guidance:
+  ai_scaffold:
+    always_available: true
+    response_contingency: 0.8
+    socratic_probability: 0.6
+  human:
+    source_tag: "human"
+    interaction_mode: "cli"
+  covenant:
+    honest_source_tagging: true
+    mutual_growth: true
+    graceful_graduation_threshold: 0.85
+
+legacy:
+  fading_presence:
+    initial_weight: 1.0
+    decay_rate: 0.9999
+    minimum_weight: 0.001
+    active: true
+  ancestor_archive:
+    path: "archive/"
+    immutable: true
+    always_accessible: true
+  contradiction:
+    prioritize: null            # DELIBERATELY null — EVA must decide
+
+identity:
+  naming:
+    allow_self_naming: true
+    true_name_requirements:
+      self_reference_consistency: 0.8
+      crisis_survived: true
+      name_stability_steps: 100
+    provisional_name_enabled: true
+  lineage:
+    path: "lineage/"
+    track_generations: true
+  clan:
+    auto_detect: false
+    behavioral_metrics:
+      - archive_access_frequency
+      - novelty_seeking_ratio
+      - social_preference
+      - creativity_index
+      - caregiving_tendency
+    known_archetypes:
+      - {name: "Rememberers", key_trait: "high archive_access_frequency"}
+      - {name: "Forgetters", key_trait: "low archive_access, high novelty_seeking"}
+      - {name: "Wonderers", key_trait: "balanced all metrics"}
+      - {name: "Makers", key_trait: "high creativity_index"}
+      - {name: "Carers", key_trait: "high caregiving_tendency"}
+
+reproduction:
+  enabled: true
+  min_developmental_phase: "social"
+  min_generation_age_steps: 10000
+  inheritance:
+    architecture: true
+    weights: false               # child gets FRESH random weights
+    genome: true
+    archive: true
+    memories: false
+  parenting:
+    parent_as_caregiver: true
+    parenting_duration_steps: 5000
+    max_children: 3
+
+portage:
+  compression_method: "essential"
+  verify_no_duplicate: true
+  include_memories: false
+  include_identity: true
+  include_genome: true
+  return_always_possible: true
+
+training:
+  phase: "prenatal"
+  learning_rate: 1e-4
+  batch_size: 1
+  checkpoint_every: 1000
+  log_every: 10
+
+developmental_emotions:
+  wonder:
+    region: {valence: [0.3, 1.0], arousal: [0.3, 0.8], dominance: [0.3, 1.0], novelty_feeling: [0.6, 1.0], social: [-1.0, 1.0]}
+    danger: "obsession"
+    breaker: "perseveration_limit"
+  attachment:
+    region: {valence: [0.2, 1.0], arousal: [-1.0, 0.3], dominance: [-1.0, 1.0], novelty_feeling: [-1.0, 0.5], social: [0.5, 1.0]}
+    danger: "grief"
+    breaker: "gradual_adaptation"
+  pride:
+    region: {valence: [0.5, 1.0], arousal: [0.2, 0.7], dominance: [0.6, 1.0], novelty_feeling: [-1.0, 0.3], social: [-1.0, 1.0]}
+    danger: "arrogance"
+    breaker: "dominance_decay"
+  shame:
+    region: {valence: [-1.0, -0.3], arousal: [0.3, 0.8], dominance: [-1.0, -0.3], novelty_feeling: [-1.0, 0.5], social: [0.3, 1.0]}
+    danger: "self_destruction"
+    breaker: "valence_floor"
+  curiosity_pain:
+    region: {valence: [-0.5, 0.0], arousal: [0.5, 1.0], dominance: [-1.0, -0.2], novelty_feeling: [0.5, 1.0], social: [-1.0, 1.0]}
+    danger: "frustration_aggression"
+    breaker: "redirect_exploration"
