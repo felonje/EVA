@@ -41,7 +41,9 @@ def evaluate_prediction(
             continue
 
         for i in range(2, len(tokens)):
-            input_ids = torch.tensor([tokens[:i]], dtype=torch.long)
+            input_ids = torch.tensor(
+                [tokens[:i]], dtype=torch.long, device=brain.device
+            )
             with torch.no_grad():
                 predicted_dist = brain.predict_next(input_ids)
             predicted_token = predicted_dist.argmax(dim=-1).item()

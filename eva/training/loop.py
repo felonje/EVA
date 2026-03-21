@@ -266,21 +266,27 @@ class TrainingLoop:
 
             # Step optimizer only every grad_accum_steps
             if accum_count >= self._grad_accum_steps:
-                base_lr = getattr(
-                    self.config.training, "learning_rate", 1e-4
-                )
-                for pg in self.optimizer.param_groups:
-                    pg["lr"] = base_lr * lr_mult
-
                 torch.nn.utils.clip_grad_norm_(
                     self.brain.parameters(), self._max_grad_norm
                 )
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                # Step scheduler after optimizer
+                # Step scheduler after optimizer to update LR
                 if scheduler is not None:
                     scheduler.step()
+
+                # Apply emotional modulation on top of scheduled LR
+                # scheduler controls warmup/decay, emotions modulate on top
+                base_lr = getattr(
+                    self.config.training, "learning_rate", 1e-4
+                )
+                if scheduler is not None:
+                    scheduled_lr = scheduler.get_last_lr()[0]
+                else:
+                    scheduled_lr = base_lr
+                for pg in self.optimizer.param_groups:
+                    pg["lr"] = scheduled_lr * lr_mult
 
                 accum_count = 0
 
