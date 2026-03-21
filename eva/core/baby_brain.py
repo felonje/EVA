@@ -197,16 +197,42 @@ class BabyBrain(nn.Module):
         return torch.zeros(1, 1, self.d_model, device=self.device, dtype=self.dtype)
 
     def get_parameter_snapshot(
-        self, sample_ratio: float = 1.0, param_names: list[str] | None = None
+        self,
+        sample_ratio: float = 1.0,
+        param_names: list[str] | None = None,
     ) -> dict[str, dict[str, float]]:
-        """Lightweight parameter snapshot for information gain."""
+        """Lightweight parameter snapshot — mean and std per layer.
+
+        Used for information gain computation. NOT a full copy.
+
+        Args:
+            sample_ratio: Fraction of parameters to sample (0.0-1.0).
+                Use < 1.0 for faster snapshots at the cost of precision.
+                Ignored if param_names is provided.
+            param_names: Explicit list of parameter names to snapshot.
+                If provided, only these parameters are included
+                (sample_ratio is ignored). This ensures before/after
+                snapshots cover the same parameters.
+
+        Returns:
+            Dict mapping layer name to {"mean": float, "std": float}.
+        """
         snapshot: dict[str, dict[str, float]] = {}
-        param_dict = dict(self.named_parameters())
-        
+
         if param_names is not None:
-            params = [(n, param_dict[n]) for n in param_names if n in param_dict]
+            # Snapshot only the explicitly requested parameters
+            param_dict = dict(self.named_parameters())
+            params = [
+                (n, param_dict[n])
+                for n in param_names
+                if n in param_dict
+            ]
         else:
-            params = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
+            params = [
+                (n, p)
+                for n, p in self.named_parameters()
+                if p.requires_grad
+            ]
             if sample_ratio < 1.0:
                 import random
                 k = max(1, int(len(params) * sample_ratio))

@@ -269,3 +269,4 @@ class EpisodicMemory:
     def clear(self) -> None:
         """Empty the buffer. Used for portage — memories don't travel."""
         self._buffer.clear()
+        self._importance_heap.clear()
