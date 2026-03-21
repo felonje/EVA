@@ -75,3 +75,7 @@ class Homeostasis:
             "rest_need": self.rest_need,
             "social_need": self.social_need,
         }
+
+    def to_dict(self) -> dict[str, float]:
+        """Return all drive levels as a dictionary (alias for get_drives)."""
+        return self.get_drives()
