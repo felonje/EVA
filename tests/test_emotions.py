@@ -40,7 +40,7 @@ class TestAffectiveState:
     def test_get_vector(self):
         state = AffectiveState()
         vec = state.get_vector()
-        assert len(vec) == 5
+        assert len(vec) == 7
 
     def test_to_dict(self):
         state = AffectiveState()

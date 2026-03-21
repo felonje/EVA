@@ -115,7 +115,7 @@ class TestBabyBrain:
     def test_creation(self):
         brain = BabyBrain(vocab_size=128, d_model=64, n_layers=2, n_heads=4, dtype_str="float32")
         assert brain.parameter_count > 0
-        assert brain.architecture in ("transformer", "mamba")
+        assert brain.architecture in ("transformer", "mamba", "mamba-minimal")
 
     def test_forward(self):
         brain = BabyBrain(vocab_size=128, d_model=64, n_layers=2, n_heads=4, dtype_str="float32")
