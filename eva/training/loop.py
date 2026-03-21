@@ -82,8 +82,10 @@ class LifeLoop:
         # State tracking
         self._step: int = 0
         self._steps_since_social: int = 0
+        self._steps_active: int = 0
         self._recent_outcomes: list[torch.Tensor] = []
         self._is_sleeping: bool = False
+        self._sft_lr_multiplier: float = 1.0
 
     def live(self, iterations: Optional[int] = None, log_every: int = 100):
         """EVA starts its life. Can run for fixed iterations or indefinitely."""
@@ -154,6 +156,19 @@ class LifeLoop:
             novelty_signal=reward_breakdown["novelty"]
         )
 
+        # Update homeostasis drives
+        self._steps_active += 1
+        self.homeostasis.update(
+            curiosity_reward=reward,
+            steps_active=self._steps_active,
+            steps_since_social=self._steps_since_social,
+        )
+
+        # Rest period (memory consolidation)
+        if self.homeostasis.needs_rest():
+            self.memory.consolidate()
+            self._steps_active = 0
+
         # Store memory
         self._store_memory(hidden, predicted_token, actual_token, reward_breakdown["prediction_error"])
 
@@ -202,11 +217,13 @@ class LifeLoop:
         """Autonomous parameter adjustment via SFT."""
         state = self.sft.get_internal_state(self.affect, self.homeostasis, self.curiosity)
         if state['affect']['valence'] < -0.6:
-            self.sft.adjust_learning_rate(0.8)
+            self._sft_lr_multiplier *= 0.8
             self.sft.log_reflection("I am stressed. Slowing down to stabilize.")
         elif state['affect']['intrinsic_drive'] > 0.9:
-            self.sft.adjust_learning_rate(1.2)
+            self._sft_lr_multiplier *= 1.2
             self.sft.log_reflection("I feel highly motivated. Accelerating growth.")
+        # Clamp SFT multiplier to safe range
+        self._sft_lr_multiplier = max(0.1, min(10.0, self._sft_lr_multiplier))
 
     def _update_weights(self, predicted_dist, actual_token):
         target = torch.tensor([actual_token], device=self.device)
@@ -217,6 +234,12 @@ class LifeLoop:
         torch.nn.utils.clip_grad_norm_(self.brain.parameters(), self._max_grad_norm)
         self.optimizer.step()
         self.optimizer.zero_grad()
+
+        # Apply emotional modulation and SFT multiplier to LR
+        lr_mult = self.modulation.get_learning_rate_multiplier(self.affect, self.homeostasis)
+        base_lr = getattr(self.config.training, "learning_rate", 1e-4)
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = base_lr * lr_mult * self._sft_lr_multiplier
 
     def _store_memory(self, hidden, action, outcome, surprise):
         importance = self.modulation.get_memory_importance(self.affect)
