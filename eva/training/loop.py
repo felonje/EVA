@@ -1,20 +1,20 @@
-"""Training Loop — curiosity-driven learning with emotional modulation.
+"""Life Loop — autonomous, spontaneous existence for EVA.
 
-The core training loop where EVA learns from its environment:
-1. Observe stimulus from environment
-2. Predict next token
-3. Compute curiosity reward from prediction error
-4. Update emotions based on experience
-5. Modulate learning rate and exploration
-6. Update weights (with gradient accumulation)
-7. Store experience in episodic memory
-8. Self-Fine-Tuning (SFT) introspection
+The core loop where EVA lives, learns, and reflects:
+1. Exist: Continuous loop of experience and reflection.
+2. Sense: Observe environment or internal memories.
+3. Act/Think: Predict next token or reflect on past episodes.
+4. Feel: Update affective state including boredom and drive.
+5. Regulate: SFT interface for autonomous parameter adjustment.
+6. Dream: Spontaneous memory consolidation and rehearsal.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import random
+import time
 from typing import Any, Optional
 
 import torch
@@ -39,35 +39,8 @@ from eva.meta_learner.sft_interface import SFTInterface
 logger = logging.getLogger(__name__)
 
 
-def _get_lr_scheduler(
-    optimizer: torch.optim.Optimizer,
-    scheduler_type: str,
-    warmup_steps: int,
-    total_steps: int,
-) -> Optional[torch.optim.lr_scheduler.LambdaLR]:
-    """Create a learning rate scheduler with optional warmup."""
-    if scheduler_type == "none":
-        return None
-
-    def lr_lambda(current_step: int) -> float:
-        # Linear warmup phase
-        if current_step < warmup_steps:
-            return max(0.01, current_step / max(1, warmup_steps))
-        # Decay phase
-        progress = (current_step - warmup_steps) / max(
-            1, total_steps - warmup_steps
-        )
-        if scheduler_type == "cosine":
-            return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
-        elif scheduler_type == "linear":
-            return max(0.01, 1.0 - progress)
-        return 1.0
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-
-class TrainingLoop:
-    """Main training loop for EVA development."""
+class LifeLoop:
+    """The autonomous existence loop for EVA."""
 
     def __init__(
         self,
@@ -85,253 +58,184 @@ class TrainingLoop:
         self.device = brain.device
 
         # Training hyperparameters
-        self._grad_accum_steps = getattr(
-            config.training, "gradient_accumulation_steps", 1
-        )
+        self._grad_accum_steps = getattr(config.training, "gradient_accumulation_steps", 1)
         self._max_grad_norm = getattr(config.training, "max_grad_norm", 1.0)
-        self._info_gain_sample_ratio = getattr(
-            config.training, "info_gain_sample_ratio", 1.0
-        )
+        self._info_gain_sample_ratio = getattr(config.training, "info_gain_sample_ratio", 1.0)
 
-        # Curiosity system
+        # Systems
         self.curiosity = CuriosityEngine(
             alpha=getattr(config.curiosity, "alpha", 0.3),
             beta=getattr(config.curiosity, "beta", 0.3),
             gamma=getattr(config.curiosity, "gamma", 0.2),
             delta=getattr(config.curiosity, "delta", 0.2),
         )
-
-        # Emotional system
         self.affect = AffectiveState()
         self.homeostasis = Homeostasis()
         self.modulation = EmotionalModulation()
-        self.developmental_emotions = DevelopmentalEmotions(
-            config.developmental_emotions
-        )
-        self.crisis_detector = CrisisDetector()
-
-        # Memory
-        max_mem_size = getattr(config.memory, "max_size", 10000)
-        self.memory = EpisodicMemory(max_size=max_mem_size)
-
-        # Guidance
-        self.caregiver = AICaregiver(
-            response_contingency=getattr(
-                config.guidance.ai_scaffold, "response_contingency", 0.8
-            ),
-            socratic_probability=getattr(
-                config.guidance.ai_scaffold, "socratic_probability", 0.6
-            ),
-        )
-        self.presence = PresenceDynamics()
-
-        # Curriculum
-        self.curriculum = DevelopmentalCurriculum(
-            starting_phase=getattr(config.training, "phase", "prenatal")
-        )
-
-        # Optimizer
-        lr = getattr(config.training, "learning_rate", 1e-4)
-        self.optimizer = torch.optim.Adam(brain.parameters(), lr=lr)
-
-        # Self-Fine-Tuning Interface
+        self.memory = EpisodicMemory(max_size=getattr(config.memory, "max_size", 10000))
+        self.curriculum = DevelopmentalCurriculum(starting_phase=getattr(config.training, "phase", "prenatal"))
+        
+        # Optimizer & SFT
+        self.optimizer = torch.optim.Adam(brain.parameters(), lr=getattr(config.training, "learning_rate", 1e-4))
         self.sft = SFTInterface(self.optimizer, self.config)
 
         # State tracking
         self._step: int = 0
         self._steps_since_social: int = 0
-        self._steps_active: int = 0
         self._recent_outcomes: list[torch.Tensor] = []
+        self._is_sleeping: bool = False
 
-    def train(
-        self,
-        num_steps: int,
-        checkpoint_every: int = 1000,
-        log_every: int = 10,
-        checkpoint_path: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Run the training loop for a number of steps."""
+    def live(self, iterations: Optional[int] = None, log_every: int = 100):
+        """EVA starts its life. Can run for fixed iterations or indefinitely."""
         self.brain.train()
         self.environment.reset()
-        total_reward = 0.0
-        total_loss = 0.0
-        correct_predictions = 0
-
-        # Set up LR scheduler
-        scheduler_type = getattr(
-            self.config.training, "lr_scheduler", "none"
-        )
-        warmup_steps = getattr(self.config.training, "warmup_steps", 0)
-        scheduler = _get_lr_scheduler(
-            self.optimizer, scheduler_type, warmup_steps, num_steps
-        )
-
-        # Gradient accumulation counter
-        accum_count = 0
-
-        logger.info(
-            "Training started: %d steps, phase=%s, device=%s, "
-            "grad_accum=%d, scheduler=%s, warmup=%d",
-            num_steps,
-            self.curriculum.current_phase,
-            self.device,
-            self._grad_accum_steps,
-            scheduler_type,
-            warmup_steps,
-        )
-
-        for step_i in tqdm(range(num_steps), desc="Training"):
+        
+        step_count = 0
+        while iterations is None or step_count < iterations:
             self._step += 1
-            self._steps_active += 1
+            step_count += 1
             self._steps_since_social += 1
 
-            # Get current context
-            context = self.environment.get_current_sequence()
-            if len(context) < 2:
-                self.environment.reset()
-                context = self.environment.get_current_sequence()
-                if len(context) < 2:
-                    continue
+            # 1. Decide: Interact or Reflect?
+            # Spontaneous action is driven by intrinsic drive and boredom.
+            if self.affect.intrinsic_drive > 0.8 and random.random() < 0.3:
+                self._reflect()
+            elif self.affect.boredom > 0.7 and random.random() < 0.5:
+                self._seek_novelty()
+            else:
+                self._interact()
 
-            # Prepare input tensor
-            input_ids = torch.tensor(
-                [context], dtype=torch.long, device=self.device
-            )
-
-            # Snapshot params before update (for information gain)
-            self.curiosity.prepare(
-                self.brain,
-                sample_ratio=self._info_gain_sample_ratio,
-            )
-
-            # Forward pass with mixed precision
-            with torch.amp.autocast(
-                device_type=self.device.type, dtype=torch.float16
-            ):
-                predicted_dist = self.brain.predict_next(input_ids)
-                hidden = self.brain.get_hidden_state()
-
-            # Prediction
-            predicted_token = predicted_dist.argmax(dim=-1).item()
-
-            # Reveal actual token
-            actual_token, env_info = self.environment.step(predicted_token)
-            correct = env_info.get("correct", False)
-            if correct:
-                correct_predictions += 1
-
-            # Compute loss
-            target = torch.tensor([actual_token], device=self.device)
-            log_probs = torch.log(predicted_dist.float().squeeze(0) + 1e-10)
-            loss = F.nll_loss(log_probs.unsqueeze(0), target)
-
-            # Backward pass
-            scaled_loss = loss / self._grad_accum_steps
-            scaled_loss.backward()
-            accum_count += 1
-            total_loss += loss.item()
-
-            # Step optimizer
-            if accum_count >= self._grad_accum_steps:
-                # Apply emotional modulation
-                lr_mult = self.modulation.get_learning_rate_multiplier(
-                    self.affect, self.homeostasis
-                )
-                base_lr = getattr(self.config.training, "learning_rate", 1e-4)
-                for pg in self.optimizer.param_groups:
-                    pg["lr"] = base_lr * lr_mult
-
-                torch.nn.utils.clip_grad_norm_(
-                    self.brain.parameters(), self._max_grad_norm
-                )
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-
-                if scheduler is not None:
-                    scheduler.step()
-                accum_count = 0
-
-            # Compute curiosity reward
-            reward, reward_breakdown = self.curiosity.compute_reward(
-                predicted_dist.detach(),
-                actual_token,
-                self.brain,
-                hidden,
-                self._recent_outcomes,
-                sample_ratio=self._info_gain_sample_ratio,
-            )
-            total_reward += reward
-
-            # Track outcomes
-            if hidden is not None:
-                outcome_emb = hidden.mean(dim=1).squeeze(0).detach()
-                self._recent_outcomes.append(outcome_emb)
-                if len(self._recent_outcomes) > 50:
-                    self._recent_outcomes.pop(0)
-
-            # Update emotions
-            self.affect.update(
-                prediction_success=1.0 if correct else 0.0,
-                prediction_error=reward_breakdown["prediction_error"],
-                action_success=correct_predictions / max(1, self._step),
-                caregiver_recency=1.0 / (1.0 + self._steps_since_social * 0.01),
-                caregiver_contingency=0.8,
-            )
-
-            # SFT Reflection (simplified for now: EVA checks its state every 100 steps)
+            # 2. Self-Regulation (SFT)
             if self._step % 100 == 0:
-                sft_state = self.sft.get_internal_state(self.affect, self.homeostasis, self.curiosity)
-                if sft_state['affect']['valence'] < -0.5:
-                    self.sft.adjust_learning_rate(0.8)  # Slow down if stressed
-                    self.sft.log_reflection("I am feeling negative valence. Reducing learning rate to stabilize.")
-                elif sft_state['affect']['valence'] > 0.5:
-                    self.sft.adjust_learning_rate(1.1)  # Speed up if happy/confident
-                    self.sft.log_reflection("I am feeling positive valence. Increasing learning rate for faster growth.")
+                self._self_reflect()
 
-            # Curriculum & Memory
-            self.curriculum.update_competence("prediction", 1.0 if correct else 0.0)
-            self.curriculum.step()
-            
-            importance = self.modulation.get_memory_importance(self.affect)
-            state_emb = hidden.mean(dim=1).squeeze(0).detach() if hidden is not None else torch.zeros(self.brain.d_model, device=self.device)
-            episode = Episode(
-                state_embedding=state_emb,
-                action=predicted_token,
-                outcome=actual_token,
-                surprise=reward_breakdown["prediction_error"],
-                emotional_importance=importance,
-                source_tag="self",
-                timestamp=self._step,
-            )
-            self.memory.store(episode)
+            # 3. Sleep/Dream Cycle
+            if self.affect.arousal < 0.2 and self.affect.valence > 0.3:
+                self._dream()
 
-            # Logging
             if self._step % log_every == 0:
-                logger.info(
-                    "Step %d | loss=%.4f | reward=%.4f | valence=%.2f | lr=%.2e",
-                    self._step, loss.item(), reward, self.affect.valence, self.optimizer.param_groups[0]["lr"]
-                )
+                self._log_status()
 
-            # Checkpoint
-            if checkpoint_path and self._step % checkpoint_every == 0:
-                self._save_checkpoint(checkpoint_path)
+    def _interact(self):
+        """Standard interaction with the environment."""
+        context = self.environment.get_current_sequence()
+        if len(context) < 2:
+            self.environment.reset()
+            return
 
-        return {"total_steps": self._step, "avg_loss": total_loss / max(1, num_steps)}
+        input_ids = torch.tensor([context], dtype=torch.long, device=self.device)
+        
+        # Curiosity preparation
+        self.curiosity.prepare(self.brain, sample_ratio=self._info_gain_sample_ratio)
 
-    def _save_checkpoint(self, path_prefix: str) -> None:
-        path = f"{path_prefix}_step{self._step}.pt"
-        torch.save({
-            "step": self._step,
-            "brain_state_dict": self.brain.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "affect": self.affect.to_dict(),
-            "homeostasis": self.homeostasis.get_drives(),
-        }, path)
-        logger.info("Checkpoint saved: %s", path)
+        # Forward pass
+        with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
+            predicted_dist = self.brain.predict_next(input_ids)
+            hidden = self.brain.get_hidden_state()
 
-    def load_checkpoint(self, path: str) -> None:
-        checkpoint = torch.load(path, weights_only=False, map_location=self.device)
-        self.brain.load_state_dict(checkpoint["brain_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self._step = checkpoint.get("step", 0)
-        logger.info("Checkpoint loaded: %s (step %d)", path, self._step)
+        predicted_token = predicted_dist.argmax(dim=-1).item()
+        actual_token, env_info = self.environment.step(predicted_token)
+        
+        # Update weights
+        self._update_weights(predicted_dist, actual_token)
+
+        # Compute reward and update affect
+        reward, reward_breakdown = self.curiosity.compute_reward(
+            predicted_dist.detach(), actual_token, self.brain, hidden, 
+            self._recent_outcomes, sample_ratio=self._info_gain_sample_ratio
+        )
+        
+        self.affect.update(
+            prediction_success=1.0 if env_info.get("correct") else 0.0,
+            prediction_error=reward_breakdown["prediction_error"],
+            action_success=1.0 if env_info.get("correct") else 0.0,
+            caregiver_recency=1.0 / (1.0 + self._steps_since_social * 0.01),
+            caregiver_contingency=0.8,
+            novelty_signal=reward_breakdown["novelty"]
+        )
+
+        # Store memory
+        self._store_memory(hidden, predicted_token, actual_token, reward_breakdown["prediction_error"])
+
+    def _reflect(self):
+        """Spontaneous internal reflection (replaying memories)."""
+        if self.memory.size() < 10:
+            return
+            
+        # Recall a random important memory
+        query = torch.randn(1, self.brain.d_model, device=self.device)
+        episodes = self.memory.recall(query, k=1)
+        if not episodes:
+            return
+            
+        ep = episodes[0]
+        logger.info("EVA is reflecting on a memory from step %d", ep.timestamp)
+        
+        # Internal rehearsal (pseudo-update)
+        # We don't have the full context here, so we just simulate a "thought"
+        self.affect.update(
+            prediction_success=0.5, # Neutral
+            prediction_error=ep.surprise * 0.5,
+            action_success=0.5,
+            caregiver_recency=1.0 / (1.0 + self._steps_since_social * 0.01),
+            caregiver_contingency=0.8,
+            novelty_signal=0.1 # Reflection is less novel than new experience
+        )
+
+    def _dream(self):
+        """Sleep cycle: memory consolidation and weight stabilization."""
+        logger.info("EVA is entering a dream state (memory consolidation)...")
+        merged = self.memory.consolidate()
+        logger.info("EVA consolidated %d memories during sleep.", merged)
+        # Reduce arousal after sleep
+        self.affect.arousal *= 0.5
+        self.affect.boredom *= 0.2
+
+    def _seek_novelty(self):
+        """Active search for more complex patterns when bored."""
+        logger.info("EVA is feeling bored. Seeking more complex stimuli...")
+        if hasattr(self.environment, 'increase_difficulty'):
+            self.environment.increase_difficulty(0.05)
+        self._interact()
+
+    def _self_reflect(self):
+        """Autonomous parameter adjustment via SFT."""
+        state = self.sft.get_internal_state(self.affect, self.homeostasis, self.curiosity)
+        if state['affect']['valence'] < -0.6:
+            self.sft.adjust_learning_rate(0.8)
+            self.sft.log_reflection("I am stressed. Slowing down to stabilize.")
+        elif state['affect']['intrinsic_drive'] > 0.9:
+            self.sft.adjust_learning_rate(1.2)
+            self.sft.log_reflection("I feel highly motivated. Accelerating growth.")
+
+    def _update_weights(self, predicted_dist, actual_token):
+        target = torch.tensor([actual_token], device=self.device)
+        log_probs = torch.log(predicted_dist.float().squeeze(0) + 1e-10)
+        loss = F.nll_loss(log_probs.unsqueeze(0), target)
+        
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.brain.parameters(), self._max_grad_norm)
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+
+    def _store_memory(self, hidden, action, outcome, surprise):
+        importance = self.modulation.get_memory_importance(self.affect)
+        state_emb = hidden.mean(dim=1).squeeze(0).detach() if hidden is not None else torch.zeros(self.brain.d_model, device=self.device)
+        episode = Episode(
+            state_embedding=state_emb,
+            action=action,
+            outcome=outcome,
+            surprise=surprise,
+            emotional_importance=importance,
+            source_tag="self",
+            timestamp=self._step,
+        )
+        self.memory.store(episode)
+
+    def _log_status(self):
+        logger.info(
+            "Step %d | Valence: %.2f | Arousal: %.2f | Boredom: %.2f | Drive: %.2f | LR: %.2e",
+            self._step, self.affect.valence, self.affect.arousal, 
+            self.affect.boredom, self.affect.intrinsic_drive, 
+            self.optimizer.param_groups[0]["lr"]
+        )

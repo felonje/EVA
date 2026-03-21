@@ -1,0 +1,43 @@
+model:
+  type: "mamba"
+  d_model: 128
+  n_layers: 4
+  vocab_size: 512
+  random_init: true
+  dtype: "float32"
+
+hardware:
+  max_ram_gb: 4
+  device: "cpu"
+
+curiosity:
+  alpha: 0.3
+  beta: 0.3
+  gamma: 0.2
+  delta: 0.2
+
+emotions:
+  enabled: true
+  dimensions: ["valence", "arousal", "dominance", "novelty_feeling", "social", "boredom", "intrinsic_drive"]
+  modulation:
+    learning_rate_scale: [0.5, 2.0]
+    memory_importance_scale: [0.1, 1.0]
+  circuit_breakers:
+    valence_floor: -0.8
+    arousal_ceiling: 0.95
+
+memory:
+  max_size: 5000
+  consolidation_batch_size: 128
+
+training:
+  phase: "prenatal"
+  learning_rate: 0.0001
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  warmup_steps: 100
+  lr_scheduler: "none"
+  info_gain_sample_ratio: 0.1
+  checkpoint_every: 500
+  log_every: 10

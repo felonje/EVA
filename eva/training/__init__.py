@@ -1,6 +1,6 @@
-"""EVA training modules — training loop and curriculum."""
+"""EVA training modules — life loop and curriculum."""
 
 from eva.training.curriculum import DevelopmentalCurriculum
-from eva.training.loop import TrainingLoop
+from eva.training.loop import LifeLoop
 
-__all__ = ["DevelopmentalCurriculum", "TrainingLoop"]
+__all__ = ["DevelopmentalCurriculum", "LifeLoop"]
