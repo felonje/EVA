@@ -5,7 +5,7 @@ from eva.core.baby_brain import BabyBrain
 from eva.core.config import EVAConfig
 from eva.core.tokenizer import EVATokenizer
 from eva.environment.nursery import NurseryEnvironment
-from eva.training.loop import TrainingLoop
+from eva.training.loop import LifeLoop
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,15 +50,13 @@ def test_mamba_sft_integration():
     )
     
     environment = NurseryEnvironment(tokenizer)
-    loop = TrainingLoop(brain, config, environment, tokenizer)
+    loop = LifeLoop(brain, config, environment, tokenizer)
     
     # 3. Run a few steps of training
-    logger.info("Running 50 steps of training...")
-    stats = loop.train(num_steps=50, log_every=10)
+    logger.info("Running 50 steps of life loop...")
+    loop.live(iterations=50, log_every=10)
     
-    logger.info("Training stats: %s", stats)
-    assert stats["total_steps"] == 50
-    assert stats["avg_loss"] > 0
+    assert loop._step == 50
     
     # 4. Check SFT Interface
     logger.info("Checking SFT interface...")

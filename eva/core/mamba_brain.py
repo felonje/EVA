@@ -22,6 +22,10 @@ class MambaConfig:
     pad_vocab_size_multiple: int = 8
     dtype: torch.dtype = torch.float16
 
+    def __post_init__(self):
+        if self.dt_rank == 'auto':
+            self.dt_rank = math.ceil(self.d_model / 16)
+
 class MambaBlock(nn.Module):
     def __init__(self, config: MambaConfig):
         super().__init__()
@@ -77,14 +81,14 @@ class MambaBlock(nn.Module):
         (b, l, d_in) = u.shape
         n = A.shape[1]
         
-        deltaA = torch.exp(einsum('b l d_in, d_in n -> b l d_in n', delta, A))
-        deltaB_u = einsum('b l d_in, b l n, b l d_in -> b l d_in n', delta, B, u)
+        deltaA = torch.exp(torch.einsum('bld,dn->bldn', delta, A))
+        deltaB_u = torch.einsum('bld,bln,bld->bldn', delta, B, u)
         
         x = torch.zeros((b, d_in, n), device=u.device)
         ys = []
         for i in range(l):
             x = deltaA[:, i] * x + deltaB_u[:, i]
-            y = einsum('b d_in n, b n -> b d_in', x, C[:, i])
+            y = torch.einsum('bdn,bn->bd', x, C[:, i])
             ys.append(y)
         y = torch.stack(ys, dim=1)
         y = y + u * D
