@@ -1,14 +1,14 @@
 """BabyBrain — The randomly initialized neural network at EVA's core.
 
 Ron Protocol: NO pretrained weights. Every EVA starts from scratch.
-Attempts to use Mamba SSM if available, falls back to Transformer.
+Now using a custom minimal Mamba implementation for 4GB RAM efficiency.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -25,69 +25,87 @@ def detect_device() -> torch.device:
         return torch.device("mps")
     return torch.device("cpu")
 
-# Try to import Mamba SSM
-_MAMBA_AVAILABLE = False
-try:
-    from mamba_ssm import Mamba
-
-    _MAMBA_AVAILABLE = True
-    logger.info("Mamba SSM available — using Mamba architecture.")
-except ImportError:
-    logger.info("Mamba SSM not available — using Transformer architecture.")
-
 
 class MambaBlock(nn.Module):
-    """Wrapper around Mamba SSM block with layer norm."""
+    """Minimal Mamba block implementation for resource-constrained environments."""
 
-    def __init__(self, d_model: int) -> None:
+    def __init__(self, d_model: int, d_state: int = 16, expand: int = 2, d_conv: int = 4):
         super().__init__()
-        self.norm = nn.LayerNorm(d_model)
-        self.mamba = Mamba(d_model=d_model)
+        self.d_model = d_model
+        self.d_inner = d_model * expand
+        self.dt_rank = math.ceil(d_model / 16)
+        self.d_state = d_state
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.mamba(self.norm(x))
-
-
-class TransformerBlock(nn.Module):
-    """Standard transformer encoder block with pre-norm."""
-
-    def __init__(self, d_model: int, n_heads: int) -> None:
-        super().__init__()
-        self.norm1 = nn.LayerNorm(d_model)
-        self.attn = nn.MultiheadAttention(
-            d_model, n_heads, batch_first=True
-        )
-        self.norm2 = nn.LayerNorm(d_model)
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, 4 * d_model),
-            nn.GELU(),
-            nn.Linear(4 * d_model, d_model),
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
+            bias=True,
+            kernel_size=d_conv,
+            groups=self.d_inner,
+            padding=d_conv - 1,
         )
 
+        self.x_proj = nn.Linear(self.d_inner, self.dt_rank + d_state * 2, bias=False)
+        self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True)
+
+        # Initialize A and D
+        A = torch.arange(1, d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
+        self.A_log = nn.Parameter(torch.log(A))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Pre-norm attention
-        normed = self.norm1(x)
-        attn_out, _ = self.attn(normed, normed, normed)
-        x = x + attn_out
-        # Pre-norm FFN
-        x = x + self.ffn(self.norm2(x))
-        return x
+        (b, l, d) = x.shape
+        x_and_res = self.in_proj(x)
+        (x, res) = x_and_res.split(split_size=[self.d_inner, self.d_inner], dim=-1)
+
+        x = x.transpose(1, 2)
+        x = self.conv1d(x)[:, :, :l]
+        x = x.transpose(1, 2)
+
+        x = F.silu(x)
+        y = self.ssm(x)
+        y = y * F.silu(res)
+
+        return self.out_proj(y)
+
+    def ssm(self, x: torch.Tensor) -> torch.Tensor:
+        (d_in, n) = self.A_log.shape
+        A = -torch.exp(self.A_log.float())
+        D = self.D.float()
+
+        x_dbl = self.x_proj(x)
+        (delta, B, C) = x_dbl.split(split_size=[self.dt_rank, n, n], dim=-1)
+        delta = F.softplus(self.dt_proj(delta))
+
+        return self.selective_scan(x, delta, A, B, C, D)
+
+    def selective_scan(self, u, delta, A, B, C, D):
+        (b, l, d_in) = u.shape
+        n = A.shape[1]
+
+        # Discretize A and B
+        # deltaA = exp(delta * A)
+        # deltaB = delta * B
+        # Equation: b l d, d n -> b l d n
+        deltaA = torch.exp(torch.einsum('bld,dn->bldn', delta, A))
+        # Equation: b l d, b l n, b l d -> b l d n
+        deltaB_u = torch.einsum('bld,bln,bld->bldn', delta, B, u)
+
+        x = torch.zeros((b, d_in, n), device=u.device, dtype=deltaA.dtype)
+        ys = []
+        for i in range(l):
+            x = deltaA[:, i] * x + deltaB_u[:, i]
+            y = torch.einsum('bdn,bn->bd', x, C[:, i])
+            ys.append(y)
+        y = torch.stack(ys, dim=1)
+        y = y + u * D
+        return y
 
 
 class BabyBrain(nn.Module):
-    """The core neural network of an EVA.
-
-    RANDOMLY INITIALIZED. No pretrained weights. This is non-negotiable.
-    Uses Mamba blocks if mamba_ssm is installed, otherwise falls back
-    to standard Transformer encoder blocks.
-
-    Args:
-        vocab_size: Size of the token vocabulary.
-        d_model: Hidden dimension size.
-        n_layers: Number of encoder layers.
-        n_heads: Number of attention heads (transformer only).
-        dtype_str: Parameter dtype as string ("float16" or "float32").
-    """
+    """The core neural network of an EVA."""
 
     def __init__(
         self,
@@ -103,26 +121,17 @@ class BabyBrain(nn.Module):
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.n_layers = n_layers
-        self.n_heads = n_heads
         self.dtype = torch.float16 if dtype_str == "float16" else torch.float32
         self.device = device if device is not None else detect_device()
-        self.architecture = "mamba" if _MAMBA_AVAILABLE else "transformer"
+        self.architecture = "mamba-minimal"
 
         # Embedding layer
         self.embedding = nn.Embedding(vocab_size, d_model)
-        self.pos_encoding = nn.Parameter(
-            torch.randn(1, 2048, d_model) * 0.02
-        )
 
         # Encoder layers
-        if _MAMBA_AVAILABLE:
-            self.layers = nn.ModuleList(
-                [MambaBlock(d_model) for _ in range(n_layers)]
-            )
-        else:
-            self.layers = nn.ModuleList(
-                [TransformerBlock(d_model, n_heads) for _ in range(n_layers)]
-            )
+        self.layers = nn.ModuleList(
+            [MambaBlock(d_model) for _ in range(n_layers)]
+        )
 
         # Output
         self.norm = nn.LayerNorm(d_model)
@@ -159,25 +168,12 @@ class BabyBrain(nn.Module):
     def forward(
         self, input_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass through the network.
-
-        Args:
-            input_ids: Token IDs of shape (batch, seq_len).
-
-        Returns:
-            Tuple of (logits, hidden_state):
-                logits: Shape (batch, seq_len, vocab_size)
-                hidden_state: Shape (batch, seq_len, d_model)
-        """
-        seq_len = input_ids.shape[-1]
-
-        # Embedding + positional encoding
+        """Forward pass through the network."""
         x = self.embedding(input_ids)
-        x = x + self.pos_encoding[:, :seq_len, :]
 
         # Encoder layers
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x) + x
 
         # Final norm
         hidden = self.norm(x)
@@ -189,50 +185,32 @@ class BabyBrain(nn.Module):
         return logits, hidden
 
     def predict_next(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Predict probability distribution over next token.
-
-        Args:
-            input_ids: Token IDs of shape (batch, seq_len).
-
-        Returns:
-            Probability distribution of shape (batch, vocab_size).
-        """
+        """Predict probability distribution over next token."""
         logits, _ = self.forward(input_ids)
-        # Take logits for the last position
         last_logits = logits[:, -1, :]
         return F.softmax(last_logits.float(), dim=-1)
 
     def get_hidden_state(self) -> torch.Tensor:
-        """Return the last hidden state from the most recent forward pass.
-
-        Returns:
-            Hidden state tensor, or zeros if no forward pass yet.
-        """
+        """Return the last hidden state."""
         if self._last_hidden is not None:
             return self._last_hidden
-        return torch.zeros(1, 1, self.d_model)
+        return torch.zeros(1, 1, self.d_model, device=self.device, dtype=self.dtype)
 
     def get_parameter_snapshot(
-        self, sample_ratio: float = 1.0
+        self, sample_ratio: float = 1.0, param_names: list[str] | None = None
     ) -> dict[str, dict[str, float]]:
-        """Lightweight parameter snapshot — mean and std per layer.
-
-        Used for information gain computation. NOT a full copy.
-
-        Args:
-            sample_ratio: Fraction of parameters to sample (0.0-1.0).
-                Use < 1.0 for faster snapshots at the cost of precision.
-
-        Returns:
-            Dict mapping layer name to {"mean": float, "std": float}.
-        """
+        """Lightweight parameter snapshot for information gain."""
         snapshot: dict[str, dict[str, float]] = {}
-        params = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
-
-        if sample_ratio < 1.0:
-            import random
-            k = max(1, int(len(params) * sample_ratio))
-            params = random.sample(params, k)
+        param_dict = dict(self.named_parameters())
+        
+        if param_names is not None:
+            params = [(n, param_dict[n]) for n in param_names if n in param_dict]
+        else:
+            params = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
+            if sample_ratio < 1.0:
+                import random
+                k = max(1, int(len(params) * sample_ratio))
+                params = random.sample(params, k)
 
         for name, param in params:
             with torch.no_grad():

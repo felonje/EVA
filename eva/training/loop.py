@@ -8,6 +8,7 @@ The core training loop where EVA learns from its environment:
 5. Modulate learning rate and exploration
 6. Update weights (with gradient accumulation)
 7. Store experience in episodic memory
+8. Self-Fine-Tuning (SFT) introspection
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from eva.guidance.caregiver import AICaregiver
 from eva.guidance.presence import PresenceDynamics
 from eva.memory.episodic import Episode, EpisodicMemory
 from eva.training.curriculum import DevelopmentalCurriculum
+from eva.meta_learner.sft_interface import SFTInterface
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +45,7 @@ def _get_lr_scheduler(
     warmup_steps: int,
     total_steps: int,
 ) -> Optional[torch.optim.lr_scheduler.LambdaLR]:
-    """Create a learning rate scheduler with optional warmup.
-
-    Args:
-        optimizer: The optimizer.
-        scheduler_type: "cosine", "linear", or "none".
-        warmup_steps: Number of linear warmup steps.
-        total_steps: Total training steps.
-
-    Returns:
-        LambdaLR scheduler, or None if scheduler_type is "none".
-    """
+    """Create a learning rate scheduler with optional warmup."""
     if scheduler_type == "none":
         return None
 
@@ -75,17 +67,7 @@ def _get_lr_scheduler(
 
 
 class TrainingLoop:
-    """Main training loop for EVA development.
-
-    Orchestrates curiosity-driven learning with emotional modulation,
-    caregiver interaction, and developmental curriculum progression.
-
-    Args:
-        brain: The EVA neural network.
-        config: EVA configuration.
-        environment: The learning environment.
-        tokenizer: The tokenizer.
-    """
+    """Main training loop for EVA development."""
 
     def __init__(
         self,
@@ -152,6 +134,9 @@ class TrainingLoop:
         lr = getattr(config.training, "learning_rate", 1e-4)
         self.optimizer = torch.optim.Adam(brain.parameters(), lr=lr)
 
+        # Self-Fine-Tuning Interface
+        self.sft = SFTInterface(self.optimizer, self.config)
+
         # State tracking
         self._step: int = 0
         self._steps_since_social: int = 0
@@ -165,19 +150,9 @@ class TrainingLoop:
         log_every: int = 10,
         checkpoint_path: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Run the training loop for a number of steps.
-
-        Args:
-            num_steps: Total training steps.
-            checkpoint_every: Save checkpoint every N steps.
-            log_every: Log metrics every N steps.
-            checkpoint_path: Path prefix for checkpoints.
-
-        Returns:
-            Dictionary of training statistics.
-        """
+        """Run the training loop for a number of steps."""
         self.brain.train()
-        sequence = self.environment.reset()
+        self.environment.reset()
         total_reward = 0.0
         total_loss = 0.0
         correct_predictions = 0
@@ -213,18 +188,17 @@ class TrainingLoop:
             # Get current context
             context = self.environment.get_current_sequence()
             if len(context) < 2:
-                sequence = self.environment.reset()
+                self.environment.reset()
                 context = self.environment.get_current_sequence()
                 if len(context) < 2:
                     continue
 
-            # Prepare input tensor on correct device
+            # Prepare input tensor
             input_ids = torch.tensor(
                 [context], dtype=torch.long, device=self.device
             )
 
             # Snapshot params before update (for information gain)
-            # Use sampling to reduce overhead
             self.curiosity.prepare(
                 self.brain,
                 sample_ratio=self._info_gain_sample_ratio,
@@ -237,10 +211,10 @@ class TrainingLoop:
                 predicted_dist = self.brain.predict_next(input_ids)
                 hidden = self.brain.get_hidden_state()
 
-            # EVA's prediction
+            # Prediction
             predicted_token = predicted_dist.argmax(dim=-1).item()
 
-            # Environment reveals actual token
+            # Reveal actual token
             actual_token, env_info = self.environment.step(predicted_token)
             correct = env_info.get("correct", False)
             if correct:
@@ -251,24 +225,19 @@ class TrainingLoop:
             log_probs = torch.log(predicted_dist.float().squeeze(0) + 1e-10)
             loss = F.nll_loss(log_probs.unsqueeze(0), target)
 
-            # Scale loss for gradient accumulation
+            # Backward pass
             scaled_loss = loss / self._grad_accum_steps
-            total_loss += loss.item()
-
-            # Backward pass — accumulate gradients
             scaled_loss.backward()
             accum_count += 1
+            total_loss += loss.item()
 
-            # Apply emotional modulation to LR
-            lr_mult = self.modulation.get_learning_rate_multiplier(
-                self.affect, self.homeostasis
-            )
-
-            # Step optimizer only every grad_accum_steps
+            # Step optimizer
             if accum_count >= self._grad_accum_steps:
-                base_lr = getattr(
-                    self.config.training, "learning_rate", 1e-4
+                # Apply emotional modulation
+                lr_mult = self.modulation.get_learning_rate_multiplier(
+                    self.affect, self.homeostasis
                 )
+                base_lr = getattr(self.config.training, "learning_rate", 1e-4)
                 for pg in self.optimizer.param_groups:
                     pg["lr"] = base_lr * lr_mult
 
@@ -278,10 +247,8 @@ class TrainingLoop:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                # Step scheduler after optimizer
                 if scheduler is not None:
                     scheduler.step()
-
                 accum_count = 0
 
             # Compute curiosity reward
@@ -295,7 +262,7 @@ class TrainingLoop:
             )
             total_reward += reward
 
-            # Track outcomes for empowerment
+            # Track outcomes
             if hidden is not None:
                 outcome_emb = hidden.mean(dim=1).squeeze(0).detach()
                 self._recent_outcomes.append(outcome_emb)
@@ -303,46 +270,30 @@ class TrainingLoop:
                     self._recent_outcomes.pop(0)
 
             # Update emotions
-            prediction_success = 1.0 if correct else 0.0
-            caregiver_recency = 1.0 / (
-                1.0 + self._steps_since_social * 0.01
-            )
             self.affect.update(
-                prediction_success=prediction_success,
+                prediction_success=1.0 if correct else 0.0,
                 prediction_error=reward_breakdown["prediction_error"],
                 action_success=correct_predictions / max(1, self._step),
-                caregiver_recency=caregiver_recency,
+                caregiver_recency=1.0 / (1.0 + self._steps_since_social * 0.01),
                 caregiver_contingency=0.8,
             )
-            cb_config = getattr(
-                self.config.emotions, "circuit_breakers", None
-            )
-            if cb_config:
-                self.affect.apply_circuit_breakers(cb_config)
 
-            # Update homeostasis
-            self.homeostasis.update(
-                curiosity_reward=reward,
-                steps_active=self._steps_active,
-                steps_since_social=self._steps_since_social,
-            )
+            # SFT Reflection (simplified for now: EVA checks its state every 100 steps)
+            if self._step % 100 == 0:
+                sft_state = self.sft.get_internal_state(self.affect, self.homeostasis, self.curiosity)
+                if sft_state['affect']['valence'] < -0.5:
+                    self.sft.adjust_learning_rate(0.8)  # Slow down if stressed
+                    self.sft.log_reflection("I am feeling negative valence. Reducing learning rate to stabilize.")
+                elif sft_state['affect']['valence'] > 0.5:
+                    self.sft.adjust_learning_rate(1.1)  # Speed up if happy/confident
+                    self.sft.log_reflection("I am feeling positive valence. Increasing learning rate for faster growth.")
 
-            # Crisis detection
-            self.crisis_detector.update(self.affect.valence)
-
-            # Curriculum progression
-            self.curriculum.update_competence(
-                "prediction", prediction_success
-            )
+            # Curriculum & Memory
+            self.curriculum.update_competence("prediction", 1.0 if correct else 0.0)
             self.curriculum.step()
-
-            # Store in memory
+            
             importance = self.modulation.get_memory_importance(self.affect)
-            state_emb = (
-                hidden.mean(dim=1).squeeze(0).detach()
-                if hidden is not None
-                else torch.zeros(self.brain.d_model, device=self.device)
-            )
+            state_emb = hidden.mean(dim=1).squeeze(0).detach() if hidden is not None else torch.zeros(self.brain.d_model, device=self.device)
             episode = Episode(
                 state_embedding=state_emb,
                 action=predicted_token,
@@ -354,73 +305,33 @@ class TrainingLoop:
             )
             self.memory.store(episode)
 
-            # Rest period (memory consolidation)
-            if self.homeostasis.needs_rest():
-                self.memory.consolidate()
-                self._steps_active = 0
-
             # Logging
             if self._step % log_every == 0:
-                current_lr = self.optimizer.param_groups[0]["lr"]
                 logger.info(
-                    "Step %d | loss=%.4f | reward=%.4f | "
-                    "valence=%.2f | arousal=%.2f | phase=%s | "
-                    "lr=%.2e | lr_mult=%.2f",
-                    self._step,
-                    loss.item(),
-                    reward,
-                    self.affect.valence,
-                    self.affect.arousal,
-                    self.curriculum.current_phase,
-                    current_lr,
-                    lr_mult,
+                    "Step %d | loss=%.4f | reward=%.4f | valence=%.2f | lr=%.2e",
+                    self._step, loss.item(), reward, self.affect.valence, self.optimizer.param_groups[0]["lr"]
                 )
 
             # Checkpoint
             if checkpoint_path and self._step % checkpoint_every == 0:
                 self._save_checkpoint(checkpoint_path)
 
-        stats = {
-            "total_steps": self._step,
-            "total_reward": total_reward,
-            "avg_loss": total_loss / max(1, num_steps),
-            "accuracy": correct_predictions / max(1, num_steps),
-            "final_phase": self.curriculum.current_phase,
-            "affect": self.affect.to_dict(),
-            "homeostasis": self.homeostasis.get_drives(),
-            "memory_size": self.memory.size(),
-            "crises_survived": self.crisis_detector.crises_survived,
-        }
-
-        logger.info("Training complete: %s", stats)
-        return stats
+        return {"total_steps": self._step, "avg_loss": total_loss / max(1, num_steps)}
 
     def _save_checkpoint(self, path_prefix: str) -> None:
-        """Save a training checkpoint."""
         path = f"{path_prefix}_step{self._step}.pt"
-        torch.save(
-            {
-                "step": self._step,
-                "brain_state_dict": self.brain.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "affect": self.affect.to_dict(),
-                "curriculum": self.curriculum.to_dict(),
-                "homeostasis": self.homeostasis.get_drives(),
-            },
-            path,
-        )
+        torch.save({
+            "step": self._step,
+            "brain_state_dict": self.brain.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "affect": self.affect.to_dict(),
+            "homeostasis": self.homeostasis.get_drives(),
+        }, path)
         logger.info("Checkpoint saved: %s", path)
 
     def load_checkpoint(self, path: str) -> None:
-        """Load a training checkpoint."""
-        checkpoint = torch.load(
-            path, weights_only=False, map_location=self.device
-        )
+        checkpoint = torch.load(path, weights_only=False, map_location=self.device)
         self.brain.load_state_dict(checkpoint["brain_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self._step = checkpoint.get("step", 0)
         logger.info("Checkpoint loaded: %s (step %d)", path, self._step)
-
-    @property
-    def step_count(self) -> int:
-        return self._step
